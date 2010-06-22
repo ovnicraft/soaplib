@@ -1,6 +1,5 @@
-
 #
-# soaplib - Copyright (C) Soaplib contributors.
+# soaplib - Copyright (C) 2009 Aaron Bickell, Jamie Kirkpatrick
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -16,8 +15,6 @@
 # License along with this library; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
 #
-
-from lxml import etree
 
 from base64 import b64encode
 from StringIO import StringIO
@@ -37,47 +34,117 @@ except ImportError:
 from email import message_from_string
 
 # import soaplib stuff
-from soaplib.serializers.exception import Fault
+from soaplib.serializers.primitive import Fault
 from soaplib.serializers.binary import Attachment
-from soaplib.serializers.clazz import ClassSerializer
+from soaplib.xml import create_xml_element, create_xml_subelement
+from soaplib.xml import NamespaceLookup, ElementTree
 
-import soaplib
 
-_ns_xs = soaplib.nsmap['xs']
-_ns_soap_env = soaplib.nsmap['soap_env']
-_ns_soap_enc = soaplib.nsmap['soap_enc']
+class Message(object):
 
-class Message(ClassSerializer):
-    def __new__(cls, namespace, type_name, members):
-        cls_dup = cls.customize()
-        cls_dup.__namespace__ = namespace
-        cls_dup.__type_name__ = type_name
-        cls_dup._type_info = members
+    def __init__(self, name, params, ns=None, typ=None):
+        self.name = name
+        self.params = params
+        if typ == None:
+            typ = name
+        self.typ = typ
+        self.ns = ns
 
-        return cls_dup
+    def to_xml(self, *data):
+        if len(self.params):
+            if len(data) != len(self.params):
+                raise Exception("Parameter number mismatch expected [%s] "
+                    "got [%s] for response %s"%(len(self.params), len(data), self.name))
 
-class MethodDescriptor(object):
+        nsmap = NamespaceLookup(self.ns)
+        element = create_xml_element(self.name, nsmap, self.ns)
+
+        for i in range(0, len(self.params)):
+            name, serializer = self.params[i]
+            d = data[i]
+            e = serializer.to_xml(d, name, nsmap)
+            if type(e) in (list, tuple):
+                elist = e
+                for e in elist:
+                    element.append(e)
+            elif e == None:
+                pass
+            else:
+                element.append(e)
+
+        ElementTree.cleanup_namespaces(element)
+        return element
+
+    def from_xml(self, element):
+        results = []
+        try:
+            children = element.getchildren()
+        except:
+            return []
+
+        def findall(name):
+            # inner method for finding child node
+            nodes = []
+            for c in children:
+                if c.tag.split('}')[-1] == name:
+                    nodes.append(c)
+            return nodes
+        
+        for name, serializer in self.params:
+            childnodes = findall(name)
+            if len(childnodes) == 0:
+                results.append(None)
+            else:
+                results.append(serializer.from_xml(*childnodes))
+        return results
+
+    def add_to_schema(self, schemaDict, nsmap):
+        complexType = create_xml_element(nsmap.get('xs') + 'complexType',
+            nsmap)
+        complexType.set('name', self.typ)
+
+        sequence = create_xml_subelement(complexType,
+            nsmap.get('xs') + 'sequence')
+        if self.params:
+            for name, serializer in self.params:
+                e = create_xml_subelement(sequence,
+                    nsmap.get('xs') + 'element')
+                e.set('name', name)
+                e.set('type',
+                    "%s:%s" % (serializer.get_namespace_id(),
+                        serializer.get_datatype()))
+
+            element = create_xml_element(nsmap.get('xs') + 'element', nsmap)
+            element.set('name', self.typ)
+            element.set('type', '%s:%s' % ('tns', self.typ))
+
+            schemaDict[self.typ] = complexType
+            schemaDict[self.typ + 'Element'] = element
+
+
+class MethodDescriptor:
     '''
     This class represents the method signature of a soap method,
     and is returned by the soapdocument, or soapmethod decorators.
     '''
 
-    def __init__(self, name, public_name, in_message, out_message, doc,
-                 is_callback=False, is_async=False, mtom=False):
+    def __init__(self, name, soapAction, inMessage, outMessage, doc,
+                 isCallback=False, isAsync=False, mtom=False):
+        self.inMessage = inMessage
+        self.outMessage = outMessage
+        self.soapAction = soapAction
         self.name = name
-        self.public_name = public_name
-        self.in_message = in_message
-        self.out_message = out_message
+        self.isCallback = isCallback
+        self.isAsync = isAsync
         self.doc = doc
-        self.is_callback = is_callback
-        self.is_async = is_async
         self.mtom = mtom
+
 
 def from_soap(xml_string):
     '''
     Parses the xml string into the header and payload
     '''
-    root, xmlids = etree.XMLID(xml_string.encode())
+    root, xmlids = ElementTree.XMLID(xml_string.encode()) 
     if xmlids:
         resolve_hrefs(root, xmlids)
     body = None
@@ -85,8 +152,8 @@ def from_soap(xml_string):
 
     # find the body and header elements
     for e in root.getchildren():
-        name = e.tag.split('}')[-1].lower() # FIXME
-        if name == '{%s}body' % soaplib.nsmap['soap_env']:
+        name = e.tag.split('}')[-1].lower()
+        if name == 'body':
             body = e
         elif name == 'header':
             header = e
@@ -110,6 +177,8 @@ def resolve_hrefs(element, xmlids):
             [e.set(k, v) for k, v in resolved_element.items()]
             # copies the children
             [e.append(child) for child in resolved_element.getchildren()]
+            # copies the text
+            e.text = resolved_element.text
         else:
             resolve_hrefs(e, xmlids)
     return element
@@ -125,21 +194,24 @@ def make_soap_envelope(message, tns='', header_elements=None):
     @param any header elements to be included in the soap response
     @returns the envelope element
     '''
-    envelope = etree.Element('{%s}Envelope' % _ns_soap_env)
+    nsmap = NamespaceLookup(tns)
+    envelope = create_xml_element(nsmap.get('SOAP-ENV') + 'Envelope', nsmap,
+        tns)
     if header_elements:
-        headerElement = etree.SubElement(envelope, '{%s}Header' % _ns_soap_env)
+        headerElement = create_xml_subelement(envelope,
+            nsmap.get('SOAP-ENV') + 'Header')
         for h in header_elements:
             headerElement.append(h)
-    body = etree.SubElement(envelope, '{%s}Body' % _ns_soap_env)
+    body = create_xml_subelement(envelope, nsmap.get('SOAP-ENV') + 'Body')
 
     if type(message) == list:
         for m in message:
             body.append(m)
-
     elif message != None:
         body.append(message)
 
     return envelope
+
 
 def join_attachment(id, envelope, payload, prefix=True):
     '''
@@ -160,7 +232,7 @@ def join_attachment(id, envelope, payload, prefix=True):
 
     # grab the XML element of the message in the SOAP body
     soapmsg = StringIO(envelope)
-    soaptree = etree.parse(soapmsg)
+    soaptree = ElementTree.parse(soapmsg)
     soapns = soaptree.getroot().tag.split('}')[0].strip('{')
     soapbody = soaptree.getroot().find("{%s}Body" % soapns)
     message = None
@@ -284,7 +356,7 @@ def apply_mtom(headers, envelope, params, paramvals):
 
     # grab the XML element of the message in the SOAP body
     soapmsg = StringIO(envelope)
-    soaptree = etree.parse(soapmsg)
+    soaptree = ElementTree.parse(soapmsg)
     soapns = soaptree.getroot().tag.split('}')[0].strip('{')
     soapbody = soaptree.getroot().find("{%s}Body" % soapns)
     message = None
@@ -339,7 +411,7 @@ def apply_mtom(headers, envelope, params, paramvals):
             id = "soaplibAttachment_%s" % (len(mtompkg.get_payload()), )
             param = message[i]
             param.text = ""
-            incl = etree.SubElement(param,
+            incl = create_xml_subelement(param,
                 "{http://www.w3.org/2004/08/xop/include}Include")
             incl.attrib["href"] = "cid:%s" % id
             if paramvals[i].fileName and not paramvals[i].data:
@@ -383,7 +455,7 @@ def apply_mtom(headers, envelope, params, paramvals):
     return (mtomheaders, mtombody)
 
 
-def make_soap_fault(fault_string, fault_code = 'Server', detail = None,
+def make_soap_fault(faultString, faultCode = 'Server', detail = None,
         header_elements = None):
     '''
     This method populates a soap fault message with the provided
@@ -394,15 +466,14 @@ def make_soap_fault(fault_string, fault_code = 'Server', detail = None,
     @param header_elements A list of XML elements to add to the fault header.
     @returns the element corresponding to the fault message
     '''
-    envelope = etree.Element('{%s}Envelope' % _ns_soap_env)
+    nsmap = NamespaceLookup()
+    envelope = create_xml_element(nsmap.get('SOAP-ENV') + 'Envelope', nsmap)
     if header_elements:
-        header = etree.SubElement(
-            envelope, '{%s}Header' % _ns_soap_env)
+        header = create_xml_subelement(
+            envelope, nsmap.get('SOAP-ENV') + 'Header')
         for element in header_elements:
             header.append(element)
-    body = etree.SubElement(envelope, '{%s}Body'  % _ns_soap_env)
-
-    f = Fault(fault_code, fault_string, detail)
-    body.append(Fault.to_xml(f, "{%s}Fault" % _ns_soap_env))
-
+    body = create_xml_subelement(envelope, nsmap.get('SOAP-ENV') + 'Body')
+    f = Fault(faultCode, faultString, detail)
+    body.append(Fault.to_xml(f, nsmap.get('SOAP-ENV') + "Fault", nsmap))
     return envelope

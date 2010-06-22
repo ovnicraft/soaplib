@@ -2,7 +2,7 @@
 
 from setuptools import setup, find_packages
 
-VERSION = '0.9.0'
+VERSION = '0.8.1'
 LONG_DESC = """\
 This is a simple, easily extendible soap library that provides several useful
 tools for creating and publishing soap web services in python.  This package
@@ -15,9 +15,6 @@ This prokect now uses lxml as it's XML API, providing full namespace support.
 """
 
 setup(name='soaplib',
-      packages = find_packages('src'),
-      package_dir = {'':'src'},
-
       version=VERSION,
       description="A simple library for writing soap web services",
       long_description=LONG_DESC,
@@ -43,4 +40,10 @@ setup(name='soaplib',
         'lxml>=2.2.1',
       ],
       test_suite='tests.test_suite',
-)
+      entry_points={
+        'console_scripts': [
+            'xsd2py = soaplib.parsers.typeparse:run',
+            'wsdl2py = soaplib.parsers.wsdlparse:run'
+        ]
+      },
+      )

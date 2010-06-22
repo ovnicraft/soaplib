@@ -1,4 +1,3 @@
-
 Indices and tables
 ==================
 

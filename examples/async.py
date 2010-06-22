@@ -21,7 +21,7 @@ import time
 from threading import Thread
 
 from soaplib.client import make_service_client
-from soaplib.service import rpc
+from soaplib.service import soapmethod
 from soaplib.serializers.primitive import String, Integer
 from soaplib.util import get_callback_info
 from soaplib.wsgi_soap import SimpleWSGISoapApp
@@ -38,7 +38,8 @@ execution of the async. process.
 
 
 class SleepingService(SimpleWSGISoapApp):
-    @rpc(Integer, _is_async=True)
+
+    @soapmethod(Integer, _isAsync=True)
     def sleep(self, seconds):
         msgid, replyto = get_callback_info()
 
@@ -50,7 +51,7 @@ class SleepingService(SimpleWSGISoapApp):
 
         Thread(target=run).start()
 
-    @rpc(String, _is_callback=True)
+    @soapmethod(String, _isCallback=True)
     def woke_up(self, message):
         pass
 

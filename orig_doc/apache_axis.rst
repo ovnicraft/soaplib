@@ -1,14 +1,8 @@
-Axis Interoperability 
-=====================
 
-The Apache Axis project is one of the most popular SOAP implementations around,
-so it was very important for soaplib to easily work with it. As a subproject of
-soaplib the axis_soaplib test suite was created to make sure soaplib and Axis
-can understand each other. This test uses Apache Ant to run the tests and
-generates the client-side java classes using the wsdl2java command.
+Axis Interoperability ¶
 
-How to run the test
--------------------
+The Apache Axis project is one of the most popular SOAP implementations around, so it was very important for soaplib to easily work with it. As a subproject of soaplib the axis_soaplib test suite was created to make sure soaplib and Axis can understand each other. This test uses Apache Ant to run the tests and generates the client-side java classes using the wsdl2java command.
+How to run the test ¶
 
     * Start the soaplib interop service from the soaplib directory
 

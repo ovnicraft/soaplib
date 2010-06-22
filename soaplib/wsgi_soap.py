@@ -1,6 +1,5 @@
-
 #
-# soaplib - Copyright (C) Soaplib contributors.
+# soaplib - Copyright (C) 2009 Aaron Bickell, Jamie Kirkpatrick
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -17,56 +16,92 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
 #
 
-import logging
+import cStringIO
 import traceback
+
+from soaplib.soap import (make_soap_envelope, make_soap_fault, from_soap,
+    collapse_swa, apply_mtom)
+from soaplib.service import SoapServiceBase
+from soaplib.util import reconstruct_url
+from soaplib.serializers.primitive import string_encoding, Fault
+from soaplib.etimport import ElementTree
 from threading import local
 
-from soaplib.soap import apply_mtom
-from soaplib.soap import collapse_swa
-from soaplib.soap import from_soap
-
-from lxml import etree
-
-from soaplib.serializers.exception import Fault
-from soaplib.serializers.primitive import string_encoding
-from soaplib.service import SoapServiceBase
-from soaplib.soap import apply_mtom
-from soaplib.soap import collapse_swa
-from soaplib.soap import make_soap_envelope
-from soaplib.soap import make_soap_fault
-from soaplib.util import reconstruct_url
-
 request = local()
+
+_exceptions = False
+_exception_logger = None
+
+_debug = False
+_debug_logger = None
+
+###################################################################
+# Logging / Debugging Utilities                                   #
+# replace with python logger?                                     #
+###################################################################
+
+
+def _dump(e): # util?
+    print e
+
+
+def log_exceptions(on, out=_dump):
+    global _exceptions
+    global _exception_logger
+
+    _exceptions=on
+    _exception_logger=out
+
+
+def log_debug(on, out=_dump):
+    global _debug
+    global _debug_logger
+    _debug=on
+    _debug_logger=out
+
+
+def debug(msg):
+    global _debug
+    global _debug_logger
+    if _debug:
+        _debug_logger(msg)
+
+
+def exceptions(msg):
+    global _exceptions
+    global _exception_logger
+    if _exceptions:
+        _exception_logger(msg)
+
 
 def reset_request():
     '''
     This method clears the data stored in the threadlocal
     request object
     '''
-    global request
-
     request.environ = None
     request.header = None
     request.additional = {}
+
 
 class WSGISoapApp(object):
     '''
     This is the base object representing a soap web application, and conforms
     to the WSGI specification (PEP 333).  This object should be overridden
-    and get_handler(environ) overridden to provide the object implementing
+    and getHandler(environ) overridden to provide the object implementing
     the specified functionality.  Hooks have been added so that the subclass
     can react to various events that happen durring the execution of the
     request.
     '''
 
-    def on_call(self, environ):
+    def onCall(self, environ):
         '''
         This is the first method called when this WSGI app is invoked
         @param the wsgi environment
         '''
         pass
 
-    def on_wsdl(self, environ, wsdl):
+    def onWsdl(self, environ, wsdl):
         '''
         This is called when a wsdl is requested
         @param the wsgi environment
@@ -74,7 +109,7 @@ class WSGISoapApp(object):
         '''
         pass
 
-    def on_wsdl_exception(self, environ, exc, resp):
+    def onWsdlException(self, environ, exc, resp):
         '''
         Called when an exception occurs durring wsdl generation
         @param the wsgi environment
@@ -83,7 +118,7 @@ class WSGISoapApp(object):
         '''
         pass
 
-    def on_method_exec(self, environ, body, py_params, soap_params):
+    def onMethodExec(self, environ, body, py_params, soap_params):
         '''
         Called BEFORE the service implementing the functionality is called
         @param the wsgi environment
@@ -93,7 +128,7 @@ class WSGISoapApp(object):
         '''
         pass
 
-    def on_results(self, environ, py_results, soap_results, headers):
+    def onResults(self, environ, py_results, soap_results):
         '''
         Called AFTER the service implementing the functionality is called
         @param the wsgi environment
@@ -102,7 +137,7 @@ class WSGISoapApp(object):
         '''
         pass
 
-    def on_exception(self, environ, exc, resp):
+    def onException(self, environ, exc, resp):
         '''
         Called when an error occurs durring execution
         @param the wsgi environment
@@ -111,7 +146,7 @@ class WSGISoapApp(object):
         '''
         pass
 
-    def on_return(self, environ, returnString):
+    def onReturn(self, environ, returnString):
         '''
         Called before the application returns
         @param the wsgi environment
@@ -119,7 +154,7 @@ class WSGISoapApp(object):
         '''
         pass
 
-    def get_handler(self, environ):
+    def getHandler(self, environ):
         '''
         This method returns the object responsible for processing a given
         request, and needs to be overridden by a subclass to handle
@@ -135,7 +170,7 @@ class WSGISoapApp(object):
         This method conforms to the WSGI spec for callable wsgi applications
         (PEP 333). It looks in environ['wsgi.input'] for a fully formed soap
         request envelope, will deserialize the request parameters and call the
-        method on the object returned by the get_handler() method.
+        method on the object returned by the getHandler() method.
         @param the http environment
         @param a callable that begins the response message
         @returns the string representation of the soap call
@@ -146,10 +181,10 @@ class WSGISoapApp(object):
             request.environ = environ
 
             # implementation hook
-            self.on_call(environ)
+            self.onCall(environ)
 
             serviceName = environ['PATH_INFO'].split('/')[-1]
-            service = self.get_handler(environ)
+            service = self.getHandler(environ)
             if ((environ['QUERY_STRING'].endswith('wsdl') or
                  environ['PATH_INFO'].endswith('wsdl')) and
                 environ['REQUEST_METHOD'].lower() == 'get'):
@@ -169,17 +204,18 @@ class WSGISoapApp(object):
                     wsdl_content = service.wsdl(url)
 
                     # implementation hook
-                    self.on_wsdl(environ, wsdl_content)
+                    self.onWsdl(environ, wsdl_content)
                 except Exception, e:
 
                     # implementation hook
-                    logging.error(traceback.format_exc())
-
-                    faultStr = etree.tostring(make_soap_fault(str(e),
-                        detail=""), encoding=string_encoding)
-                    logging.debug(faultStr)
-
-                    self.on_wsdl_exception(environ, e, faultStr)
+                    buffer = cStringIO.StringIO()
+                    traceback.print_exc(file=buffer)
+                    buffer.seek(0)
+                    stacktrace = str(buffer.read())
+                    faultStr = ElementTree.tostring(make_soap_fault(str(e),
+                        detail=stacktrace), encoding=string_encoding)
+                    exceptions(faultStr)
+                    self.onWsdlException(environ, e, faultStr)
                     # initiate the response
                     start_response('500 Internal Server Error',
                                    [('Content-type', 'text/xml'),
@@ -199,14 +235,17 @@ class WSGISoapApp(object):
 
             methodname = environ.get("HTTP_SOAPACTION")
 
-            if not (methodname is None):
-                logging.debug('\033[92m'+ methodname +'\033[0m')
-            logging.debug(body)
+            debug('\033[92m'+ methodname +'\033[0m')
+            debug(body)
 
             body = collapse_swa(environ.get("CONTENT_TYPE"), body)
 
             # deserialize the body of the message
-            payload, header = from_soap(body)
+            try:
+                payload, header = from_soap(body)
+            except SyntaxError, e:
+                payload = None
+                header = None
 
             if payload is not None and len(payload) > 0:
                 methodname = payload.tag
@@ -223,15 +262,14 @@ class WSGISoapApp(object):
             # retrieve the method descriptor
             descriptor = service.get_method(methodname)
             func = getattr(service, descriptor.name)
-
+            
             if payload is not None and len(payload) > 0:
-                params = descriptor.in_message.from_xml(*[payload])
+                params = descriptor.inMessage.from_xml(*[payload])
             else:
                 params = ()
-
             # implementation hook
             self.onMethodExec(environ, body, params,
-                descriptor.in_message.params)
+                descriptor.inMessage.params)
 
             # call the method
             retval = func(*params)
@@ -239,12 +277,11 @@ class WSGISoapApp(object):
             # transform the results into an element
             # only expect a single element
             results = None
-            if not (descriptor.is_async or descriptor.is_callback):
-                results = descriptor.out_message.to_xml(*[retval])
+            if not (descriptor.isAsync or descriptor.isCallback):
+                results = descriptor.outMessage.to_xml(*[retval])
 
             # implementation hook
-            headers = {'Content-Type': 'text/xml'}
-            self.onResults(environ, results, retval, headers)
+            self.onResults(environ, results, retval)
 
             # grab any headers that were included in the request
             response_headers = None
@@ -254,11 +291,12 @@ class WSGISoapApp(object):
             # construct the soap response, and serialize it
             envelope = make_soap_envelope(results, tns=service.__tns__,
                 header_elements=response_headers)
-            resp = etree.tostring(envelope, encoding=string_encoding)
+            resp = ElementTree.tostring(envelope, encoding=string_encoding)
+            headers = {'Content-Type': 'text/xml'}
 
             if descriptor.mtom:
                 headers, resp = apply_mtom(headers, resp,
-                    descriptor.out_message.params, (retval, ))
+                    descriptor.outMessage.params, (retval, ))
 
             if 'CONTENT_LENGTH' in environ:
                 del environ['CONTENT_LENGTH']
@@ -268,8 +306,8 @@ class WSGISoapApp(object):
 
             self.onReturn(environ, resp)
 
-            logging.debug('\033[91m'+ "Response" + '\033[0m')
-            logging.debug(etree.tostring(envelope, pretty_print=True))
+            debug('\033[91m'+ "Response" + '\033[0m')
+            debug(resp)
 
             # return the serialized results
             reset_request()
@@ -288,9 +326,9 @@ class WSGISoapApp(object):
                 e.detail,
                 header_elements=response_headers)
 
-            faultStr = etree.tostring(fault, encoding=string_encoding)
+            faultStr = ElementTree.tostring(fault, encoding=string_encoding)
 
-            logging.error(faultStr)
+            exceptions(faultStr)
 
             self.onException(environ, e, faultStr)
             reset_request()
@@ -305,28 +343,23 @@ class WSGISoapApp(object):
             # back to the caller
 
             # capture stacktrace
-            stacktrace=traceback.format_exc()
-
-            # psycopg specific
-            if hasattr(e,'statement') and hasattr(e,'params'):
-                e.statement=""
-                e.params={}
+            buffer = cStringIO.StringIO()
+            traceback.print_exc(file=buffer)
+            buffer.seek(0)
+            stacktrace = str(buffer.read())
 
             faultstring = str(e)
-
             if methodname:
-                faultcode = '%sFault' % methodname
+                faultcode = faultCode = '%sFault' % methodname
             else:
                 faultcode = 'Server'
+            detail = stacktrace
 
-            detail = ' '
-            logging.error(stacktrace)
-
-            faultStr = etree.tostring(make_soap_fault(faultstring,
+            faultStr = ElementTree.tostring(make_soap_fault(faultstring,
                 faultcode, detail), encoding=string_encoding)
-            logging.debug(faultStr)
+            exceptions(faultStr)
 
-            self.on_exception(environ, e, faultStr)
+            self.onException(environ, e, faultStr)
             reset_request()
 
             # initiate the response
@@ -350,5 +383,5 @@ class SimpleWSGISoapApp(WSGISoapApp, SoapServiceBase):
         WSGISoapApp.__init__(self)
         SoapServiceBase.__init__(self)
 
-    def get_handler(self, environ):
+    def getHandler(self, environ):
         return self

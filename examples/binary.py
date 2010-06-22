@@ -18,7 +18,7 @@
 #
 
 from soaplib.wsgi_soap import SimpleWSGISoapApp
-from soaplib.service import rpc
+from soaplib.service import soapmethod
 from soaplib.serializers.primitive import String
 from soaplib.serializers.binary import Attachment
 
@@ -28,7 +28,8 @@ import os
 
 
 class DocumentArchiver(SimpleWSGISoapApp):
-    @rpc(Attachment, _returns=String)
+
+    @soapmethod(Attachment, _returns=String)
     def archive_document(self, document):
         '''
         This method accepts an Attachment object, and returns
@@ -37,12 +38,12 @@ class DocumentArchiver(SimpleWSGISoapApp):
         fd, fname = mkstemp()
         os.close(fd)
 
-        document.file_name = fname
+        document.fileName = fname
         document.save_to_file()
 
         return fname
 
-    @rpc(String, _returns=Attachment)
+    @soapmethod(String, _returns=Attachment)
     def get_archived_document(self, file_path):
         '''
         This method loads a document from the specified file path
@@ -52,7 +53,7 @@ class DocumentArchiver(SimpleWSGISoapApp):
         if not os.path.exists(file_path):
             raise Exception("File [%s] not found"%file_path)
 
-        document = Attachment(file_name=file_path)
+        document = Attachment(fileName=file_path)
         # the service automatically loads the data from the file.
         # alternatively, The data could be manually loaded into memory
         # and loaded into the Attachment like:
